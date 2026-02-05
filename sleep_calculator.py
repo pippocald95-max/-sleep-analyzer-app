@@ -1,17 +1,14 @@
-import pandas as pd
 from datetime import datetime, timedelta
+import pandas as pd
 
 class SleepCalculator:
-    """Calcola metriche del sonno da dati puliti del diario."""
+    """Calcola metriche del sonno con validazione outlier."""
 
-    def __init__(self, max_inertia_minutes=30):
-        self.max_inertia_minutes = max_inertia_minutes
+    def __init__(self):
+        pass
 
     def time_diff_minutes(self, time1, time2):
-        """Differenza in minuti tra due datetime.time; se time2 <= time1 assume giorno successivo.
-
-        Usare questa funzione per intervalli che possono attraversare mezzanotte (es. 23:30 -> 05:15).
-        """
+        """Calcola differenza gestendo mezzanotte."""
         if time1 is None or time2 is None:
             return 0
 
@@ -19,93 +16,107 @@ class SleepCalculator:
         dt1 = datetime.combine(base_date, time1)
         dt2 = datetime.combine(base_date, time2)
 
-        # FIX mezzanotte
+        # Se time2 <= time1, assume che sia il giorno successivo
         if dt2 <= dt1:
             dt2 += timedelta(days=1)
 
         diff_minutes = (dt2 - dt1).total_seconds() / 60
         return max(0, diff_minutes)
 
-    def time_diff_same_day_minutes(self, time1, time2):
-        """Differenza in minuti tra due datetime.time sullo STESSO giorno.
+    def calculate_total_time_in_bed(self, row):
+        """TIB = N - H (ora_alzato - ora_letto)"""
+        if row.get('ora_letto_clean') is None or row.get('ora_alzato_clean') is None:
+            return None
 
-        Usare questa funzione quando la sottrazione deve essere "semplice" (es. sveglia -> alzata al mattino).
-        Se time2 < time1, ritorna 0 (non forza il passaggio al giorno successivo).
-        """
-        if time1 is None or time2 is None:
-            return 0
+        tib_minutes = self.time_diff_minutes(row['ora_letto_clean'], row['ora_alzato_clean'])
+        tib_hours = tib_minutes / 60
 
-        base_date = datetime(2026, 1, 1)
-        dt1 = datetime.combine(base_date, time1)
-        dt2 = datetime.combine(base_date, time2)
+        # VALIDAZIONE: TIB tra 2 e 20 ore è realistico
+        if tib_hours < 2 or tib_hours > 20:
+            return None  # Outlier
 
-        diff_minutes = (dt2 - dt1).total_seconds() / 60
-        return max(0, diff_minutes)
-
-    def calculate_time_in_bed(self, row):
-        if row.get('ora_spento_luci_clean') is None or row.get('ora_alzato_clean') is None:
-            return 0
-        tib_minutes = self.time_diff_minutes(row['ora_spento_luci_clean'], row['ora_alzato_clean'])
-        return tib_minutes / 60
-
-    def calculate_morning_inertia_minutes(self, row):
-        """Inerzia mattutina (minuti): ora_alzato - ora_sveglia_finale.
-
-        Richiesta: sottrazione semplice tra colonna N (alzato) e M (sveglia finale), senza gestire mezzanotte.
-        """
-        if row.get('ora_sveglia_finale_clean') is None or row.get('ora_alzato_clean') is None:
-            return 0
-        return self.time_diff_same_day_minutes(row['ora_sveglia_finale_clean'], row['ora_alzato_clean'])
+        return tib_hours
 
     def calculate_sleep_duration(self, row):
-        if row.get('ora_spento_luci_clean') is None or row.get('ora_alzato_clean') is None:
-            return 0
+        """TST = M - I - J - L (ora_sveglia_finale - ora_spento_luci - latenza - veglia)"""
+        if row.get('ora_spento_luci_clean') is None or row.get('ora_sveglia_finale_clean') is None:
+            return None
 
-        tib_minutes = self.time_diff_minutes(row['ora_spento_luci_clean'], row['ora_alzato_clean'])
-        if tib_minutes <= 0:
-            return 0
+        # Tempo base: da spento luci a sveglia finale
+        tempo_base_minutes = self.time_diff_minutes(
+            row['ora_spento_luci_clean'], 
+            row['ora_sveglia_finale_clean']
+        )
 
-        latency = row.get('latenza_minuti', 0) or 0
+        # Sottrai latenza e veglia
+        latenza = row.get('latenza_minuti', 0) or 0
         waso = row.get('veglia_infrasonno_minuti', 0) or 0
 
-        inertia_raw = self.calculate_morning_inertia_minutes(row)
-        inertia_used = min(inertia_raw, self.max_inertia_minutes)
+        tst_minutes = tempo_base_minutes - latenza - waso
+        tst_hours = tst_minutes / 60
 
-        tst_minutes = tib_minutes - latency - waso - inertia_used
-        tst_minutes = max(0, min(tst_minutes, tib_minutes))
-        tst_minutes = min(tst_minutes, 960)
+        # VALIDAZIONE: TST tra 1 e 16 ore è realistico
+        if tst_hours < 1 or tst_hours > 16:
+            return None  # Outlier
 
-        return tst_minutes / 60
+        return max(0, tst_hours)
 
-    def calculate_sleep_efficiency(self, row):
-        if row.get('tempo_a_letto_ore', 0) == 0:
-            return 0
-        efficiency = (row.get('durata_sonno_ore', 0) / row['tempo_a_letto_ore']) * 100
-        return min(efficiency, 100)
+    def calculate_all_metrics(self, row):
+        """Calcola tutte le metriche con validazione."""
+        metrics = {}
 
-    def calculate_all_metrics(self, df):
+        # TIB
+        metrics['tempo_totale_a_letto_ore'] = self.calculate_total_time_in_bed(row)
+
+        # TST
+        metrics['durata_sonno_ore'] = self.calculate_sleep_duration(row)
+
+        # Tempo sveglio
+        tib = metrics['tempo_totale_a_letto_ore']
+        tst = metrics['durata_sonno_ore']
+
+        if tib is not None and tst is not None:
+            metrics['tempo_sveglio_letto_ore'] = max(0, tib - tst)
+
+            # Efficienza
+            if tib > 0:
+                metrics['efficienza_sonno'] = min(100, (tst / tib) * 100)
+            else:
+                metrics['efficienza_sonno'] = None
+        else:
+            metrics['tempo_sveglio_letto_ore'] = None
+            metrics['efficienza_sonno'] = None
+
+        return metrics
+
+    def process_dataframe(self, df):
+        """Processa tutto il dataframe."""
         df = df.copy()
 
+        # Ordina per data
         if 'data_compilazione' in df.columns:
-            if not df['data_compilazione'].is_monotonic_increasing:
-                df = df.sort_values('data_compilazione', ascending=True).reset_index(drop=True)
+            df = df.sort_values('data_compilazione', ascending=True).reset_index(drop=True)
 
-        df['tempo_a_letto_ore'] = df.apply(self.calculate_time_in_bed, axis=1)
+        # Calcola metriche
+        metrics_list = []
+        for idx, row in df.iterrows():
+            metrics = self.calculate_all_metrics(row)
+            metrics_list.append(metrics)
 
-        # Inerzia mattutina: valore grezzo e valore usato nel TST
-        df['inerzia_mattutina_min'] = df.apply(self.calculate_morning_inertia_minutes, axis=1)
-        df['inerzia_mattutina_usata_min'] = df['inerzia_mattutina_min'].clip(upper=self.max_inertia_minutes)
+        metrics_df = pd.DataFrame(metrics_list)
+        for col in metrics_df.columns:
+            df[col] = metrics_df[col]
 
-        df['durata_sonno_ore'] = df.apply(self.calculate_sleep_duration, axis=1)
-        df['efficienza_sonno'] = df.apply(self.calculate_sleep_efficiency, axis=1)
-
+        # MEDIE ROLLING CON min_periods=1 (usa solo dati disponibili!)
         if 'data_compilazione' in df.columns:
-            df['media_rolling_7gg_durata'] = df['durata_sonno_ore'].rolling(window=7, min_periods=1).mean()
-            df['media_rolling_7gg_efficienza'] = df['efficienza_sonno'].rolling(window=7, min_periods=1).mean()
-            df['media_rolling_7gg_inerzia'] = df['inerzia_mattutina_min'].rolling(window=7, min_periods=1).mean()
-        else:
-            df['media_rolling_7gg_durata'] = df['durata_sonno_ore']
-            df['media_rolling_7gg_efficienza'] = df['efficienza_sonno']
-            df['media_rolling_7gg_inerzia'] = df['inerzia_mattutina_min']
+            df['media_rolling_7gg_durata'] = df['durata_sonno_ore'].rolling(
+                window=7, min_periods=1
+            ).mean()
+            df['media_rolling_7gg_efficienza'] = df['efficienza_sonno'].rolling(
+                window=7, min_periods=1
+            ).mean()
+            df['media_rolling_7gg_tib'] = df['tempo_totale_a_letto_ore'].rolling(
+                window=7, min_periods=1
+            ).mean()
 
         return df

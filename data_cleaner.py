@@ -1,372 +1,171 @@
+import re
 import pandas as pd
 import numpy as np
 from datetime import datetime, time
-import re
 
 class SleepDataCleaner:
-    """Pulisce i dati del diario del sonno gestendo formati inconsistenti e input 'umani'."""
+    """Pulisce i dati del sonno gestendo TUTTI i formati sporchi per tutti i clienti."""
 
-    def __init__(self, max_latency_minutes=240, max_waso_minutes=720):
-        self.max_latency_minutes = max_latency_minutes
-        self.max_waso_minutes = max_waso_minutes
+    def __init__(self):
+        pass
 
-        self.column_mapping = {
-            'A che ora sei andato a letto? (utilizza il formato hh:mm)': 'ora_letto',
-            'A che ora hai spento le luci per andare a dormire? (utilizza il formato hh:mm)': 'ora_spento_luci',
-            'Quanto tempo hai impiegato per addormentarti? (indica il tempo in minuti, utilizza solo cifre numeriche)': 'latenza_minuti',
-            'Quante volte ti sei svegliato la scorsa notte?': 'num_risvegli',
-            "Quanto tempo sei stato sveglio durante la notte? (utilizza il formato hh:mm, ad esempio, se sei stato sveglio un'ora e mezza scrivi 01:30)": 'veglia_infrasonno',
-            "A che ora ti sei svegliato per l'ultima volta stamattina? (utilizza il formato hh:mm)": 'ora_sveglia_finale',
-            'A che ora ti sei alzato dal letto? (utilizza il formato hh:mm)': 'ora_alzato',
-            "All'incirca, quante ore hai dormito la scorsa notte? (utilizza il formato hh:mm)": 'ore_dormite_stimate',
-            'Start time': 'data_compilazione',
-            'Completion time': 'data_completamento'
-        }
-
-        self.name_mappings = {
-            'maria': 'Maria Iob',
-            'maria iob': 'Maria Iob',
-            'sarah c': 'Sarah Cetola',
-            'sarah c.': 'Sarah Cetola',
-            'sarah cetola': 'Sarah Cetola',
-            'raia claudia': 'Claudia Raia',
-            'claudia raia': 'Claudia Raia'
-        }
-
-    # -----------------------
-    # Nomi
-    # -----------------------
-    def normalize_client_name(self, name):
-        if pd.isna(name) or str(name).strip() == '':
+    def parse_time_string(self, time_str):
+        """Converte QUALSIASI formato di orario in datetime.time."""
+        if pd.isna(time_str) or time_str == '' or time_str is None:
             return None
-        name = str(name).strip()
-        name_lower = re.sub(r'\s+', ' ', name.lower()).replace('.', '').replace(',', '')
-        if name_lower in self.name_mappings:
-            return self.name_mappings[name_lower]
-        return ' '.join(w.capitalize() for w in name_lower.split())
 
-    def smart_merge_similar_names(self, df, nome_col):
-        if nome_col not in df.columns:
-            return df
+        time_str = str(time_str).strip()
 
-        df = df.copy()
-        df['nome_temp'] = df[nome_col].apply(self.normalize_client_name)
-        unique_names = df['nome_temp'].dropna().unique()
-        merge_map = {}
-
-        for name in unique_names:
-            if name in merge_map:
-                continue
-
-            name_parts = name.lower().split()
-            for other in unique_names:
-                if name == other:
-                    continue
-
-                other_parts = other.lower().split()
-
-                if len(name_parts) == 2 and len(other_parts) == 2:
-                    if set(name_parts) == set(other_parts) and name_parts != other_parts:
-                        merge_map[max(name, other)] = min(name, other)
-                        continue
-
-                if len(name_parts) < len(other_parts):
-                    if all(p in other_parts for p in name_parts):
-                        merge_map[name] = other
-                        break
-
-                if len(name_parts) == 2 and len(other_parts) == 2:
-                    if (name_parts[0] == other_parts[0] and
-                        len(name_parts[1]) == 1 and
-                        other_parts[1].startswith(name_parts[1])):
-                        merge_map[name] = other
-                        break
-
-        df['nome_cliente_normalizzato'] = df['nome_temp'].replace(merge_map)
-        df.drop('nome_temp', axis=1, inplace=True)
-        return df
-
-    # -----------------------
-    # Clean main
-    # -----------------------
-    def clean_data(self, df):
-        df = df.copy()
-
-        nome_col = None
-        for col in df.columns:
-            cl = str(col).lower()
-            if 'nome' in cl and 'cognome' in cl:
-                nome_col = col
-                break
-
-        if nome_col:
-            df['nome_cliente_originale'] = df[nome_col]
-            df = self.smart_merge_similar_names(df, nome_col)
-
-        rename_dict = {}
-        for old_col in df.columns:
-            for key, val in self.column_mapping.items():
-                if key in str(old_col):
-                    rename_dict[old_col] = val
-                    break
-        df.rename(columns=rename_dict, inplace=True)
-
-        if 'ora_spento_luci' in df.columns:
-            df['ora_spento_luci_clean'] = df['ora_spento_luci'].apply(self.parse_time)
-
-        if 'ora_alzato' in df.columns:
-            df['ora_alzato_clean'] = df['ora_alzato'].apply(self.parse_time)
-
-        if 'ora_sveglia_finale' in df.columns:
-            df['ora_sveglia_finale_clean'] = df['ora_sveglia_finale'].apply(self.parse_time)
-
-        if 'latenza_minuti' in df.columns:
-            df['latenza_minuti'] = df['latenza_minuti'].apply(self.parse_latency_minutes)
-
-        if 'veglia_infrasonno' in df.columns:
-            df['veglia_infrasonno_minuti'] = df['veglia_infrasonno'].apply(self.parse_waso_minutes)
-
-        if 'num_risvegli' in df.columns:
-            df['num_risvegli'] = df['num_risvegli'].apply(self.parse_number)
-
-        if 'data_compilazione' in df.columns:
-            df['data_compilazione'] = pd.to_datetime(
-                df['data_compilazione'], format='mixed', dayfirst=False, errors='coerce'
-            )
-
-        return df
-
-    # -----------------------
-    # Parsing time (ROBUSTO)
-    # -----------------------
-    def _normalize_sep(self, s: str) -> str:
-        s = s.strip().lower()
-        s = s.replace(' ', '')
-        s = s.replace(';', ':').replace(',', ':').replace('.', ':')
-        s = re.sub(r'[^0-9:]', '', s)
-        if s.count(':') > 1:
-            first = s.find(':')
-            s = s[:first+1] + s[first+1:].replace(':', '')
-        return s
-
-    def _fix_hours(self, h_str: str):
-        digits = re.sub(r'\D', '', str(h_str))
-        if digits == '':
+        # Rimuovi testo descrittivo
+        text_indicators = ['non', 'dormito', 'divano', 'ricordo', 'addormentato', 'penso']
+        if any(word in time_str.lower() for word in text_indicators):
             return None
-        h = int(digits)
 
-        if h == 24:
-            return 0
-        if 0 <= h <= 23:
-            return h
+        # Rimuovi parte dopo slash se presente (es. "10:40/11:00" → "10:40")
+        if '/' in time_str:
+            time_str = time_str.split('/')[0].strip()
 
-        # Caso tipo "223" -> 23
-        if len(digits) >= 2:
-            h2 = int(digits[-2:])
-            if h2 == 24:
-                return 0
-            if 0 <= h2 <= 23:
-                return h2
+        # Gestisci typo comuni: "223;15" → "23:15"
+        if time_str.startswith('2') and len(time_str) > 5:
+            time_str = time_str[1:]  # Rimuovi primo 2 se sembra un typo
+
+        # Sostituisci separatori NON standard
+        time_str = time_str.replace('.', ':')    # Punto → due punti
+        time_str = time_str.replace(',', ':')    # Virgola → due punti  
+        time_str = time_str.replace(';', ':')    # Punto e virgola → due punti
+        time_str = time_str.replace("'", ':')    # Apostrofo → due punti
+        time_str = time_str.replace(' ', '')     # Rimuovi spazi
+
+        # Gestisci "24:XX" e "24.XX" (ore oltre 24)
+        parts = time_str.split(':')
+        if len(parts) >= 2:
+            try:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+
+                # Se ore >= 24, converti in formato 00-23
+                if hours >= 24:
+                    hours = hours - 24
+
+                # Validazione
+                if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                    return time(hours, minutes)
+            except:
+                pass
+
+        # Prova numero intero (es. "22" → 22:00)
+        try:
+            num = float(time_str)
+            hours = int(num)
+
+            if hours >= 24:
+                hours = hours - 24
+
+            if 0 <= hours <= 23:
+                return time(hours, 0)
+        except:
+            pass
 
         return None
 
-    def _fix_minutes(self, m_str: str):
-        digits = re.sub(r'\D', '', str(m_str))
-        if digits == '':
+    def parse_duration_minutes(self, duration_str):
+        """Converte QUALSIASI formato di durata in minuti."""
+        if pd.isna(duration_str) or duration_str == '' or duration_str is None:
             return 0
 
-        # 1 cifra -> prendila così com'è
-        if len(digits) == 1:
-            m = int(digits)
-            return m if 0 <= m <= 59 else None
+        duration_str = str(duration_str).strip().lower()
 
-        # 2 cifre
-        if len(digits) == 2:
-            m = int(digits)
-            return m if 0 <= m <= 59 else None
+        # Casi speciali testuali = 0
+        text_zero = ['0', '00', 'secondi', 'non saprei', 'no', 'non ricordo', 'nessuna']
+        if duration_str in text_zero:
+            return 0
 
-        # 3 cifre: prova a "saltare" la cifra centrale (125 -> 15)
-        if len(digits) == 3:
-            candidates = [
-                int(digits[0] + digits[2]),  # 125 -> 15
-                int(digits[-2:]),            # 125 -> 25
-                int(digits[:2])              # 125 -> 12
-            ]
-        else:
-            # 4+ cifre: fallback su ultime 2, poi prime 2
-            candidates = [
-                int(digits[-2:]),
-                int(digits[:2])
-            ]
+        # Testi descrittivi che indicano valori non affidabili = None
+        unreliable_texts = ['non ho dormito', 'quasi tutta', 'tutta notte', 'penso di non', 'non penso']
+        if any(text in duration_str for text in unreliable_texts):
+            return None  # Segna come dato non affidabile
 
-        for m in candidates:
-            if 0 <= m <= 59:
-                return m
-        return None
+        # Rimuovi testo comune
+        duration_str = duration_str.replace('min', '').replace('minuti', '').replace('mi', '').strip()
 
-    def parse_time(self, value):
-        """Converte vari formati di orario in datetime.time, includendo '24:00' e input corrotti."""
-        if pd.isna(value) or value == '' or value == 0:
-            return None
+        # Range con slash (es. "10/15" → media)
+        if '/' in duration_str:
+            parts = duration_str.split('/')
+            try:
+                nums = [float(re.findall(r'\d+', p)[0]) for p in parts if re.findall(r'\d+', p)]
+                if nums:
+                    return sum(nums) / len(nums)
+            except:
+                pass
 
-        if isinstance(value, str) and not any(ch.isdigit() for ch in value):
-            return None
+        # Formato HH:MM (potenziale outlier!)
+        if ':' in duration_str:
+            parts = duration_str.split(':')
+            try:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                total_minutes = hours * 60 + minutes
 
-        if isinstance(value, time):
+                # OUTLIER DETECTION: latenza > 2 ore è irrealistico
+                if total_minutes > 120:
+                    return None  # Marca come outlier
+
+                return total_minutes
+            except:
+                pass
+
+        # Estrai primo numero
+        numbers = re.findall(r'\d+', duration_str)
+        if numbers:
+            value = float(numbers[0])
+
+            # OUTLIER DETECTION: latenza > 120 min è irrealistico
+            if value > 120:
+                return None
+
             return value
 
-        if isinstance(value, datetime):
-            return value.time()
+        return 0
 
-        # Excel time fraction
-        if isinstance(value, (float, int, np.number, np.floating)):
-            v = float(value)
-            if 0 <= v < 1:
-                total_seconds = int(round(v * 24 * 3600))
-                hh = (total_seconds // 3600) % 24
-                mm = (total_seconds % 3600) // 60
-                return time(hh, mm)
+    def clean_data(self, df):
+        """Pulisce tutti i dati del dataframe."""
+        df = df.copy()
 
-            hh = int(v)
-            dec = v - hh
+        # Mappatura colonne basata sul file Excel reale
+        col_map = {
+            'nome_cliente': 6,  # Colonna "Inserisci il tuo Nome e Cognome"
+            'ora_letto': 7,     # Colonna H
+            'ora_spento_luci': 8,  # Colonna I
+            'latenza': 9,       # Colonna J
+            'num_risvegli': 10,
+            'veglia_notte': 11,  # Colonna L
+            'ora_sveglia_finale': 12,  # Colonna M
+            'ora_alzato': 13,   # Colonna N
+            'data_compilazione': 1  # Start time
+        }
 
-            if hh == 24 and abs(dec) < 1e-9:
-                return time(0, 0)
+        # 1. Nome cliente normalizzato
+        df['nome_cliente_normalizzato'] = df.iloc[:, col_map['nome_cliente']].apply(
+            lambda x: str(x).strip().title() if pd.notna(x) else None
+        )
 
-            mm = int(round(dec * 60))
-            if hh == 24 and mm == 0:
-                return time(0, 0)
-            if 0 <= hh < 24 and 0 <= mm < 60:
-                return time(hh, mm)
-            return None
+        # 2. Data compilazione
+        df['data_compilazione'] = pd.to_datetime(df.iloc[:, col_map['data_compilazione']], errors='coerce')
 
-        s = self._normalize_sep(str(value))
+        # 3. Orari puliti
+        df['ora_letto_clean'] = df.iloc[:, col_map['ora_letto']].apply(self.parse_time_string)
+        df['ora_spento_luci_clean'] = df.iloc[:, col_map['ora_spento_luci']].apply(self.parse_time_string)
+        df['ora_sveglia_finale_clean'] = df.iloc[:, col_map['ora_sveglia_finale']].apply(self.parse_time_string)
+        df['ora_alzato_clean'] = df.iloc[:, col_map['ora_alzato']].apply(self.parse_time_string)
 
-        # "24" o "24:00" o "24:0"
-        if re.fullmatch(r'24(:0{1,2})?', s):
-            return time(0, 0)
+        # 4. Latenza in minuti (con gestione outlier)
+        df['latenza_minuti'] = df.iloc[:, col_map['latenza']].apply(self.parse_duration_minutes)
 
-        # hhmm senza separatore (es. 2315)
-        if ':' not in s:
-            digits = re.sub(r'\D', '', s)
-            if len(digits) == 4:
-                hh = self._fix_hours(digits[:2])
-                mm = self._fix_minutes(digits[2:])
-                if hh is not None and mm is not None:
-                    return time(hh, mm)
-            return None
+        # 5. Veglia infrasonno in minuti (con gestione outlier)
+        df['veglia_infrasonno_minuti'] = df.iloc[:, col_map['veglia_notte']].apply(self.parse_duration_minutes)
 
-        parts = s.split(':')
-        if len(parts) != 2:
-            return None
+        # 6. Sostituisci None con 0 per latenza e veglia (dopo outlier detection)
+        df['latenza_minuti'] = df['latenza_minuti'].fillna(0)
+        df['veglia_infrasonno_minuti'] = df['veglia_infrasonno_minuti'].fillna(0)
 
-        hh = self._fix_hours(parts[0])
-        mm = self._fix_minutes(parts[1])
-
-        if hh is None or mm is None:
-            return None
-
-        return time(hh, mm)
-
-    # -----------------------
-    # Minutes / durations
-    # -----------------------
-    def _parse_minutes_general(self, value):
-        if pd.isna(value) or str(value).strip() == '':
-            return 0.0
-
-        if isinstance(value, (int, float, np.number)):
-            return float(value)
-
-        s = str(value).strip().lower()
-        if 'non' in s or 'no' in s or 'secondi' in s:
-            return 0.0
-
-        s = s.replace(' ', '').replace(';', ':').replace(',', ':').replace('.', ':')
-
-        if ':' in s:
-            parts = s.split(':')
-            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                a = int(parts[0])
-                b = int(parts[1])
-
-                # caso "30:00" inteso come 30 minuti
-                if b == 0 and a <= 300:
-                    return float(a)
-
-                if 0 <= b < 60:
-                    return float(a * 60 + b)
-
-        if '/' in s:
-            nums = re.findall(r'\d+', s)
-            if len(nums) >= 2:
-                return (float(nums[0]) + float(nums[1])) / 2
-
-        nums = re.findall(r'\d+', s)
-        return float(nums[0]) if nums else 0.0
-
-    def parse_latency_minutes(self, value):
-        minutes = self._parse_minutes_general(value)
-        if minutes < 0:
-            return 0.0
-        if minutes > self.max_latency_minutes:
-            return 0.0
-        return float(minutes)
-
-    def parse_duration_to_minutes(self, value):
-        if pd.isna(value) or str(value).strip() == '':
-            return 0.0
-
-        if isinstance(value, (int, float, np.number)):
-            v = float(value)
-            # Excel time fraction (frazione di giorno)
-            if 0 < v < 1:
-                return v * 24 * 60
-            return v
-
-        if isinstance(value, time):
-            return float(value.hour * 60 + value.minute)
-
-        s = str(value).strip().lower()
-        if 'non' in s or 'no' in s or 'secondi' in s:
-            return 0.0
-
-        s = s.replace(' ', '').replace(';', ':').replace(',', ':').replace('.', ':')
-
-        if '/' in s:
-            nums = re.findall(r'\d+', s)
-            if len(nums) >= 2:
-                return (float(nums[0]) + float(nums[1])) / 2
-
-        m = re.match(r'^(\d{1,3}):(\d{1,3})$', s)
-        if m:
-            hh = int(m.group(1))
-            mm = int(m.group(2))
-            if 0 <= mm < 60 and hh >= 0:
-                return float(hh * 60 + mm)
-
-        nums = re.findall(r'\d+', s)
-        return float(nums[0]) if nums else 0.0
-
-    def parse_waso_minutes(self, value):
-        minutes = self.parse_duration_to_minutes(value)
-        if minutes < 0:
-            return 0.0
-        if minutes > self.max_waso_minutes:
-            return float(self.max_waso_minutes)
-        return float(minutes)
-
-    def parse_number(self, value):
-        if pd.isna(value) or str(value).strip() == '':
-            return 0.0
-        if isinstance(value, (int, float, np.number)):
-            return float(value)
-
-        s = str(value).strip().lower()
-        if '/' in s:
-            nums = re.findall(r'\d+', s)
-            if len(nums) >= 2:
-                return (float(nums[0]) + float(nums[1])) / 2
-
-        nums = re.findall(r'\d+', s)
-        return float(nums[0]) if nums else 0.0
+        return df

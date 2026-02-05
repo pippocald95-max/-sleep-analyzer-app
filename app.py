@@ -4,9 +4,10 @@ from data_cleaner import SleepDataCleaner
 from sleep_calculator import SleepCalculator
 import io
 
-st.set_page_config(page_title="Sleep Data Analyzer", page_icon="😴", layout="wide")
+st.set_page_config(page_title="Analizzatore Sonno", page_icon="😴", layout="wide")
 
 def format_hours_to_hhmm(hours):
+    """Formatta ore decimali in formato hh h mm min."""
     if pd.isna(hours) or hours == 0:
         return "0h 0min"
     h = int(hours)
@@ -14,6 +15,7 @@ def format_hours_to_hhmm(hours):
     return f"{h}h {m}min"
 
 def format_delta_hours(delta_hours):
+    """Formatta delta ore con segno."""
     if pd.isna(delta_hours):
         return ""
     sign = "+" if delta_hours >= 0 else ""
@@ -27,204 +29,253 @@ def format_delta_hours(delta_hours):
     return f"{sign}{h}h {m}min"
 
 def format_minutes(mins):
+    """Formatta minuti."""
     if pd.isna(mins) or mins == 0:
         return "0 min"
     return f"{mins:.0f} min"
 
-st.title("😴 Analizzatore Dati del Sonno")
-st.markdown("**Carica uno o più file Excel, seleziona il cliente e ottieni tutti i risultati automaticamente**")
+# ==================== UI ====================
 
-uploaded_files = st.file_uploader(
-    "📁 Carica uno o più file Excel del diario del sonno",
-    type=['xlsx', 'xls'],
-    accept_multiple_files=True
+st.title("😴 Analizzatore Dati del Sonno")
+st.markdown("**Carica file Excel, seleziona il cliente e ottieni risultati validati**")
+
+uploaded_file = st.file_uploader(
+    "📁 Carica file Excel del diario del sonno",
+    type=['xlsx', 'xls']
 )
 
-if uploaded_files:
+if uploaded_file:
     try:
-        all_dfs = []
-        total_rows = 0
-        for uploaded_file in uploaded_files:
-            df_temp = pd.read_excel(uploaded_file)
-            total_rows += len(df_temp)
-            all_dfs.append(df_temp)
+        # Carica dati
+        df = pd.read_excel(uploaded_file)
+        st.success(f"✅ File caricato! {len(df)} righe trovate.")
 
-        df = pd.concat(all_dfs, ignore_index=True)
-        st.success(f"✅ {len(uploaded_files)} file caricati con successo! {total_rows} righe totali trovate.")
-
+        # Pulisci dati
         cleaner = SleepDataCleaner()
         df = cleaner.clean_data(df)
 
-        nome_col_normalizzato = 'nome_cliente_normalizzato'
-        if nome_col_normalizzato not in df.columns:
-            st.error("❌ Colonna del nome cliente non trovata!")
-            st.write("Colonne disponibili:", list(df.columns))
-            st.stop()
-
-        df_clean = df[df[nome_col_normalizzato].notna()].copy()
-        df_clean = df_clean[df_clean[nome_col_normalizzato].astype(str).str.strip() != ''].copy()
+        # Filtra righe con nome valido
+        df_clean = df[df['nome_cliente_normalizzato'].notna()].copy()
 
         if 'data_compilazione' in df_clean.columns:
             df_clean = df_clean.sort_values('data_compilazione', ascending=True).reset_index(drop=True)
 
-        clienti = sorted(df_clean[nome_col_normalizzato].dropna().unique())
+        clienti = sorted(df_clean['nome_cliente_normalizzato'].dropna().unique())
+
         st.markdown("---")
 
-        with st.expander("📋 Dettagli file caricati"):
-            for i, uploaded_file in enumerate(uploaded_files, 1):
-                st.write(f"{i}. {uploaded_file.name} - {len(all_dfs[i-1])} righe")
-
+        # Selezione cliente
         col1, col2, col3 = st.columns([2, 1, 1])
+
         with col1:
             selected_client = st.selectbox(
                 "👤 Seleziona il cliente da analizzare:",
                 options=["Tutti i clienti"] + list(clienti),
                 index=0
             )
+
         with col2:
             st.metric("Clienti totali", len(clienti))
+
         with col3:
             st.metric("Notti totali", len(df_clean))
 
+        # Filtra per cliente
         if selected_client != "Tutti i clienti":
-            df_filtered = df_clean[df_clean[nome_col_normalizzato] == selected_client].copy()
+            df_filtered = df_clean[df_clean['nome_cliente_normalizzato'] == selected_client].copy()
             st.info(f"📊 Analizzando {len(df_filtered)} notti per **{selected_client}**")
-
-            if 'data_compilazione' in df_filtered.columns and df_filtered['data_compilazione'].notna().any():
-                date_min = df_filtered['data_compilazione'].min()
-                date_max = df_filtered['data_compilazione'].max()
-                st.caption(f"📅 Periodo: dal {date_min.strftime('%d/%m/%Y')} al {date_max.strftime('%d/%m/%Y')}")
         else:
             df_filtered = df_clean.copy()
             st.info(f"📊 Analizzando {len(df_filtered)} notti per tutti i clienti")
 
-        client_counts = df_filtered[nome_col_normalizzato].value_counts()
-        with st.expander("👥 Distribuzione notti per cliente"):
-            for cliente, count in client_counts.items():
-                st.write(f"- {cliente}: {count} notti")
-
         if st.button("🚀 Analizza Dati", type="primary"):
-            with st.spinner("Pulizia e calcolo in corso..."):
+            with st.spinner("Calcolo in corso..."):
+                # Calcola metriche
                 calculator = SleepCalculator()
-                df_results = calculator.calculate_all_metrics(df_filtered)
+                df_results = calculator.process_dataframe(df_filtered)
+
                 st.success("✅ Analisi completata!")
+
+                # ==================== STATISTICHE ====================
 
                 st.markdown("---")
                 st.subheader("📊 Statistiche Globali (Tutto il Periodo)")
 
-                avg_duration_global = df_results['durata_sonno_ore'].mean()
-                avg_efficiency_global = df_results['efficienza_sonno'].mean()
-                avg_tib_global = df_results['tempo_a_letto_ore'].mean()
-                avg_latency_global = df_results['latenza_minuti'].mean()
-                avg_inerzia_global = df_results.get('inerzia_mattutina_min', pd.Series([0])).mean()
+                # Filtra righe con dati validi per statistiche
+                df_valid = df_results[
+                    df_results['tempo_totale_a_letto_ore'].notna() &
+                    df_results['durata_sonno_ore'].notna()
+                ].copy()
 
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1:
-                    st.metric("Durata Media Sonno", format_hours_to_hhmm(avg_duration_global))
-                with col2:
-                    st.metric("Efficienza Media", f"{avg_efficiency_global:.1f}%")
-                with col3:
-                    st.metric("Tempo a Letto Medio", format_hours_to_hhmm(avg_tib_global))
-                with col4:
-                    st.metric("Latenza Media", f"{avg_latency_global:.0f} min")
-                with col5:
-                    st.metric("Inerzia Mattutina", format_minutes(avg_inerzia_global))
-
-                st.markdown("---")
-                st.subheader("📈 Statistiche Ultimi 7 Giorni")
-
-                if len(df_results) >= 7:
-                    df_last_7 = df_results.tail(7)
-                    caption_7gg = "Medie calcolate sulle ultime 7 notti"
+                if len(df_valid) == 0:
+                    st.warning("⚠️ Nessun dato valido trovato!")
                 else:
-                    df_last_7 = df_results
-                    caption_7gg = f"Medie calcolate sulle ultime {len(df_results)} notti (meno di 7 disponibili)"
-                st.caption(caption_7gg)
+                    # Medie globali SOLO su dati validi
+                    avg_tib = df_valid['tempo_totale_a_letto_ore'].mean()
+                    avg_tst = df_valid['durata_sonno_ore'].mean()
+                    avg_eff = df_valid['efficienza_sonno'].mean()
+                    avg_latency = df_valid['latenza_minuti'].mean()
+                    avg_waso = df_valid['veglia_infrasonno_minuti'].mean()
 
-                avg_duration_7d = df_last_7['durata_sonno_ore'].mean()
-                avg_efficiency_7d = df_last_7['efficienza_sonno'].mean()
-                avg_tib_7d = df_last_7['tempo_a_letto_ore'].mean()
-                avg_latency_7d = df_last_7['latenza_minuti'].mean()
-                avg_inerzia_7d = df_last_7.get('inerzia_mattutina_min', pd.Series([0])).mean()
+                    col1, col2, col3, col4, col5 = st.columns(5)
 
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1:
-                    delta_duration = avg_duration_7d - avg_duration_global
-                    st.metric("Durata Media Sonno", format_hours_to_hhmm(avg_duration_7d), delta=f"{format_delta_hours(delta_duration)} vs globale")
-                with col2:
-                    delta_efficiency = avg_efficiency_7d - avg_efficiency_global
-                    st.metric("Efficienza Media", f"{avg_efficiency_7d:.1f}%", delta=f"{delta_efficiency:+.1f}% vs globale")
-                with col3:
-                    delta_tib = avg_tib_7d - avg_tib_global
-                    st.metric("Tempo a Letto Medio", format_hours_to_hhmm(avg_tib_7d), delta=f"{format_delta_hours(delta_tib)} vs globale")
-                with col4:
-                    delta_latency = avg_latency_7d - avg_latency_global
-                    st.metric("Latenza Media", f"{avg_latency_7d:.0f} min", delta=f"{delta_latency:+.0f} min vs globale")
-                with col5:
-                    delta_inerzia = avg_inerzia_7d - avg_inerzia_global
-                    st.metric("Inerzia Mattutina", format_minutes(avg_inerzia_7d), delta=f"{delta_inerzia:+.0f} min vs globale")
+                    with col1:
+                        st.metric("TIB Medio", format_hours_to_hhmm(avg_tib))
 
-                st.markdown("")
-                col1, col2 = st.columns(2)
-                with col1:
-                    avg_waso_global = df_results['veglia_infrasonno_minuti'].mean()
-                    st.metric("WASO Globale", f"{avg_waso_global:.0f} min")
-                with col2:
-                    avg_waso_7d = df_last_7['veglia_infrasonno_minuti'].mean()
-                    delta_waso = avg_waso_7d - avg_waso_global
-                    st.metric("WASO Ultimi 7gg", f"{avg_waso_7d:.0f} min", delta=f"{delta_waso:+.0f} min vs globale")
+                    with col2:
+                        st.metric("TST Medio", format_hours_to_hhmm(avg_tst))
 
-                st.markdown("---")
-                st.subheader("📋 Dati Elaborati")
+                    with col3:
+                        st.metric("Efficienza Media", f"{avg_eff:.1f}%")
 
-                display_cols = [
-                    nome_col_normalizzato,
-                    'data_compilazione',
-                    'durata_sonno_ore',
-                    'efficienza_sonno',
-                    'tempo_a_letto_ore',
-                    'latenza_minuti',
-                    'veglia_infrasonno_minuti',
-                    'inerzia_mattutina_min',
-                    'media_rolling_7gg_durata',
-                    'media_rolling_7gg_efficienza',
-                    'media_rolling_7gg_inerzia'
-                ]
+                    with col4:
+                        st.metric("Latenza Media", format_minutes(avg_latency))
 
-                display_cols_available = [c for c in display_cols if c in df_results.columns]
-                df_display = df_results[display_cols_available].copy()
+                    with col5:
+                        st.metric("WASO Medio", format_minutes(avg_waso))
 
-                if 'data_compilazione' in df_display.columns:
-                    df_display['Data'] = pd.to_datetime(df_display['data_compilazione']).dt.strftime('%Y-%m-%d')
-                    df_display['Ora'] = pd.to_datetime(df_display['data_compilazione']).dt.strftime('%H:%M')
-                    df_display = df_display.drop('data_compilazione', axis=1)
-                    cols = ['Data', 'Ora'] + [c for c in df_display.columns if c not in ['Data', 'Ora']]
-                    df_display = df_display[cols]
+                    # ==================== ULTIMI 7 GIORNI ====================
 
-                st.dataframe(df_display.head(50), use_container_width=True, hide_index=True)
+                    st.markdown("---")
+                    st.subheader("📈 Statistiche Ultimi 7 Giorni")
 
-                if len(df_results) > 50:
-                    st.caption(f"Mostrate prime 50 righe su {len(df_results)} totali. Scarica l'Excel per vedere tutto.")
+                    # Ultimi 7 dati validi (anche se < 7)
+                    df_last_7 = df_valid.tail(7)
 
-                st.markdown("---")
-                st.subheader("💾 Download Risultati")
+                    if len(df_last_7) < 7:
+                        st.caption(f"⚠️ Medie calcolate sulle ultime {len(df_last_7)} notti valide (meno di 7 disponibili)")
+                    else:
+                        st.caption("Medie calcolate sulle ultime 7 notti valide")
 
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_results.to_excel(writer, index=False, sheet_name='Risultati')
-                output.seek(0)
+                    avg_tib_7 = df_last_7['tempo_totale_a_letto_ore'].mean()
+                    avg_tst_7 = df_last_7['durata_sonno_ore'].mean()
+                    avg_eff_7 = df_last_7['efficienza_sonno'].mean()
+                    avg_latency_7 = df_last_7['latenza_minuti'].mean()
+                    avg_waso_7 = df_last_7['veglia_infrasonno_minuti'].mean()
 
-                filename = f"risultati_{selected_client.replace(' ', '_')}.xlsx" if selected_client != "Tutti i clienti" else "risultati_tutti_clienti.xlsx"
-                st.download_button(
-                    label="📥 Scarica Excel con tutti i risultati",
-                    data=output,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                    col1, col2, col3, col4, col5 = st.columns(5)
+
+                    with col1:
+                        delta = avg_tib_7 - avg_tib
+                        st.metric("TIB Medio", format_hours_to_hhmm(avg_tib_7), 
+                                 delta=f"{format_delta_hours(delta)} vs globale")
+
+                    with col2:
+                        delta = avg_tst_7 - avg_tst
+                        st.metric("TST Medio", format_hours_to_hhmm(avg_tst_7),
+                                 delta=f"{format_delta_hours(delta)} vs globale")
+
+                    with col3:
+                        delta = avg_eff_7 - avg_eff
+                        st.metric("Efficienza Media", f"{avg_eff_7:.1f}%",
+                                 delta=f"{delta:+.1f}% vs globale")
+
+                    with col4:
+                        delta = avg_latency_7 - avg_latency
+                        st.metric("Latenza Media", format_minutes(avg_latency_7),
+                                 delta=f"{delta:+.0f} min vs globale")
+
+                    with col5:
+                        delta = avg_waso_7 - avg_waso
+                        st.metric("WASO Medio", format_minutes(avg_waso_7),
+                                 delta=f"{delta:+.0f} min vs globale")
+
+                    # ==================== TABELLA DATI ====================
+
+                    st.markdown("---")
+                    st.subheader("📋 Dati Elaborati")
+
+                    display_cols = [
+                        'nome_cliente_normalizzato',
+                        'data_compilazione',
+                        'tempo_totale_a_letto_ore',
+                        'durata_sonno_ore',
+                        'efficienza_sonno',
+                        'tempo_sveglio_letto_ore',
+                        'latenza_minuti',
+                        'veglia_infrasonno_minuti',
+                        'media_rolling_7gg_tib',
+                        'media_rolling_7gg_durata',
+                        'media_rolling_7gg_efficienza'
+                    ]
+
+                    display_cols_available = [c for c in display_cols if c in df_results.columns]
+                    df_display = df_results[display_cols_available].copy()
+
+                    # Formatta data
+                    if 'data_compilazione' in df_display.columns:
+                        df_display['Data'] = pd.to_datetime(df_display['data_compilazione']).dt.strftime('%Y-%m-%d')
+                        df_display = df_display.drop('data_compilazione', axis=1)
+
+                    # Rinomina colonne per visualizzazione
+                    rename_map = {
+                        'nome_cliente_normalizzato': 'Cliente',
+                        'tempo_totale_a_letto_ore': 'TIB (ore)',
+                        'durata_sonno_ore': 'TST (ore)',
+                        'efficienza_sonno': 'Efficienza (%)',
+                        'tempo_sveglio_letto_ore': 'Tempo Sveglio (ore)',
+                        'latenza_minuti': 'Latenza (min)',
+                        'veglia_infrasonno_minuti': 'WASO (min)',
+                        'media_rolling_7gg_tib': 'TIB Media 7gg',
+                        'media_rolling_7gg_durata': 'TST Media 7gg',
+                        'media_rolling_7gg_efficienza': 'Eff Media 7gg'
+                    }
+                    df_display = df_display.rename(columns=rename_map)
+
+                    # Arrotonda valori numerici
+                    for col in df_display.columns:
+                        if df_display[col].dtype in ['float64', 'float32']:
+                            df_display[col] = df_display[col].round(2)
+
+                    st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+                    if len(df_results) > 50:
+                        st.caption(f"💡 Mostrate prime righe. Scarica l'Excel per vedere tutto.")
+
+                    # ==================== DOWNLOAD ====================
+
+                    st.markdown("---")
+                    st.subheader("💾 Download Risultati")
+
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df_results.to_excel(writer, index=False, sheet_name='Risultati')
+                    output.seek(0)
+
+                    filename = f"risultati_{selected_client.replace(' ', '_')}.xlsx" if selected_client != "Tutti i clienti" else "risultati_tutti_clienti.xlsx"
+
+                    st.download_button(
+                        label="📥 Scarica Excel con tutti i risultati",
+                        data=output,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
     except Exception as e:
         st.error(f"❌ Errore durante l'elaborazione: {str(e)}")
         st.exception(e)
 
 else:
-    st.info("👆 Carica uno o più file Excel per iniziare l'analisi")
+    st.info("👆 Carica un file Excel per iniziare l'analisi")
+
+# ==================== TEST INFO ====================
+
+with st.expander("ℹ️ Info sui Calcoli"):
+    st.markdown("""
+    ### Formule
+    - **TIB** (Tempo Totale a Letto) = N - H = Ora Alzato - Ora Letto
+    - **TST** (Durata Sonno Effettiva) = M - I - J - L = Ora Sveglia Finale - Ora Spento Luci - Latenza - WASO
+    - **Tempo Sveglio** = TIB - TST
+    - **Efficienza Sonno** = (TST / TIB) × 100
+
+    ### Validazione Outlier
+    - Latenza > 120 min → rimosso
+    - TIB < 2h o > 20h → rimosso
+    - TST < 1h o > 16h → rimosso
+    - Testi non numerici → gestiti automaticamente
+
+    ### Formati Supportati
+    - Orari: `23:00`, `23,00`, `23;00`, `23.00`, `24:30` (→ 00:30)
+    - Durate: `15`, `15 min`, `10/15` (→ media), `01:30` (→ 90 min)
+    - Testi: `"Non ho dormito"`, `"Non ricordo"` → gestiti come valori nulli
+    """)
